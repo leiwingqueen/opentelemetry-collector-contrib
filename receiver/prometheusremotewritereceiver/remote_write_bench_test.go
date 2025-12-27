@@ -54,7 +54,14 @@ func setupMetricsReceiverBench(tb testing.TB) *prometheusRemoteWriteReceiver {
 // makeWriteV2Request builds a deterministic writev2.Request with the requested number of series,
 // samples per series, and extra labels per series.
 func makeWriteV2Request(numSeries, samplesPerSeries, extraLabels int) *writev2.Request {
-	symbols := []string{"", "__name__", "job", "myjob", "instance", "myinstance"}
+	symbols := []string{"", "__name__", "job", "my_job", "instance", "my_instance"}
+	// extra labels
+	extraLabelIndexStart := len(symbols)
+	for j := 0; j < extraLabels; j++ {
+		k := fmt.Sprintf("k%d", j)
+		v := fmt.Sprintf("v%d", j)
+		symbols = append(symbols, k, v)
+	}
 
 	ts := make([]writev2.TimeSeries, 0, numSeries)
 	for i := 0; i < numSeries; i++ {
@@ -64,14 +71,11 @@ func makeWriteV2Request(numSeries, samplesPerSeries, extraLabels int) *writev2.R
 		symbols = append(symbols, metricName)
 		labelRefs = append(labelRefs, uint32(len(symbols)-1))
 		// job & instance
-		labelRefs = append(labelRefs, 2, 4)
+		labelRefs = append(labelRefs, 2, 3, 4, 5)
 		// extra labels
 		for j := 0; j < extraLabels; j++ {
-			k := fmt.Sprintf("k%d", j)
-			v := fmt.Sprintf("v%d", j)
-			symbols = append(symbols, k, v)
 			// add refs to key and value
-			labelRefs = append(labelRefs, uint32(len(symbols)-2), uint32(len(symbols)-1))
+			labelRefs = append(labelRefs, uint32(extraLabelIndexStart+2*j), uint32(extraLabelIndexStart+2*j+1))
 		}
 
 		samples := make([]writev2.Sample, 0, samplesPerSeries)
@@ -114,7 +118,7 @@ func BenchmarkRemoteWrite(b *testing.B) {
 					prw := setupMetricsReceiverBench(b)
 
 					// Precompute payload (raw proto) to focus on receiver translation cost.
-					req := makeWriteV2Request(sz, samples, 2)
+					req := makeWriteV2Request(sz, samples, 10)
 					payload := encodeProto(req)
 
 					// Warmup
