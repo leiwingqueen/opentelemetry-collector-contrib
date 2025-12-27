@@ -15,6 +15,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/gogo/protobuf/proto"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusremotewritereceiver/internal"
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
@@ -179,14 +180,16 @@ func (prw *prometheusRemoteWriteReceiver) handlePRW(w http.ResponseWriter, req *
 		return
 	}
 
-	var prw2Req writev2.Request
-	if err = proto.Unmarshal(body, &prw2Req); err != nil {
+	ctx := internal.GetPushCtx()
+	defer internal.PutPushCtx(ctx)
+	// var prw2Req writev2.Request
+	if err = proto.Unmarshal(body, &ctx.WriteRequest); err != nil {
 		prw.settings.Logger.Warn("Error decoding remote write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	m, stats, err := prw.translateV2(req.Context(), &prw2Req)
+	m, stats, err := prw.translateV2(req.Context(), &ctx.WriteRequest)
 	stats.SetHeaders(w)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest) // Following instructions at https://prometheus.io/docs/specs/remote_write_spec_2_0/#invalid-samples
@@ -318,11 +321,16 @@ func (prw *prometheusRemoteWriteReceiver) translateV2(_ context.Context, req *wr
 			attrs := rm.Resource().Attributes()
 
 			// Add the remaining labels as resource attributes
-			for labelName, labelValue := range ls.Map() {
+			ls.Range(func(l labels.Label) {
+				if l.Name != "job" && l.Name != "instance" && !schema.IsMetadataLabel(l.Name) {
+					attrs.PutStr(l.Name, l.Value)
+				}
+			})
+			/*for labelName, labelValue := range ls.Map() {
 				if labelName != "job" && labelName != "instance" && !schema.IsMetadataLabel(labelName) {
 					attrs.PutStr(labelName, labelValue)
 				}
-			}
+			}*/
 
 			snapshot := pmetric.NewResourceMetrics()
 			attrs.CopyTo(snapshot.Resource().Attributes())
@@ -739,17 +747,24 @@ func convertAbsoluteBuckets(spans []writev2.BucketSpan, counts []float64, bucket
 // extractAttributes return all attributes different from job, instance, metric name and scope name/version
 func extractAttributes(ls labels.Labels) pcommon.Map {
 	attrs := pcommon.NewMap()
-	labelMap := ls.Map()
+	// labelMap := ls.Map()
 	// job, instance and metric name will always become labels
-	attrs.EnsureCapacity(len(labelMap) - 3)
-	for labelName, labelValue := range labelMap {
+	attrs.EnsureCapacity(ls.Len() - 3)
+	ls.Range(func(l labels.Label) {
+		if l.Name != "instance" && l.Name != "job" || // Become resource attributes
+			l.Name != model.MetricNameLabel && // Becomes metric name
+				l.Name != "otel_scope_name" && l.Name != "otel_scope_version" { // Becomes scope name and version
+			attrs.PutStr(l.Name, l.Value)
+		}
+	})
+	/*for labelName, labelValue := range labelMap {
 		if labelName == "instance" || labelName == "job" || // Become resource attributes
 			labelName == string(model.MetricNameLabel) || // Becomes metric name
 			labelName == "otel_scope_name" || labelName == "otel_scope_version" { // Becomes scope name and version
 			continue
 		}
 		attrs.PutStr(labelName, labelValue)
-	}
+	}*/
 	return attrs
 }
 

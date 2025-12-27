@@ -98,12 +98,6 @@ func encodeProto(req *writev2.Request) []byte {
 	return b
 }
 
-func makeHTTPRequestFromProto(bts []byte) *httptest.ResponseRecorder {
-	// helper not used directly; kept for completeness
-	_ = bts
-	return nil
-}
-
 func BenchmarkRemoteWrite(b *testing.B) {
 	seriesSizes := []int{10, 100, 1000}
 	samplesList := []int{1, 5}
