@@ -751,9 +751,9 @@ func extractAttributes(ls labels.Labels) pcommon.Map {
 	// job, instance and metric name will always become labels
 	attrs.EnsureCapacity(ls.Len() - 3)
 	ls.Range(func(l labels.Label) {
-		if l.Name != "instance" && l.Name != "job" || // Become resource attributes
+		if l.Name != "instance" && l.Name != "job" && // Become resource attributes
 			l.Name != model.MetricNameLabel && // Becomes metric name
-				l.Name != "otel_scope_name" && l.Name != "otel_scope_version" { // Becomes scope name and version
+			l.Name != "otel_scope_name" && l.Name != "otel_scope_version" { // Becomes scope name and version
 			attrs.PutStr(l.Name, l.Value)
 		}
 	})
