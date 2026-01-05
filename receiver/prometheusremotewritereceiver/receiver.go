@@ -6,14 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
-	"github.com/gogo/protobuf/proto"
 	lru "github.com/hashicorp/golang-lru/v2"
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
 	"github.com/prometheus/common/model"
@@ -49,6 +47,7 @@ func newRemoteWriteReceiver(settings receiver.Settings, cfg *Config, nextConsume
 			ReadTimeout: 60 * time.Second,
 		},
 		rmCache: cache,
+		parser:  newPooledParser(10 * 1024 * 1024),
 	}, nil
 }
 
@@ -62,6 +61,8 @@ type prometheusRemoteWriteReceiver struct {
 
 	rmCache *lru.Cache[uint64, pmetric.ResourceMetrics]
 	obsrecv *receiverhelper.ObsReport
+
+	parser *pooledParser
 }
 
 // metricIdentity contains all the components that uniquely identify a metric
@@ -172,7 +173,16 @@ func (prw *prometheusRemoteWriteReceiver) handlePRW(w http.ResponseWriter, req *
 	// After parsing the content-type header, the next step would be to handle content-encoding.
 	// Luckly confighttp's Server has middleware that already decompress the request body for us.
 
-	body, err := io.ReadAll(req.Body)
+	// 解析请求
+	prw2Req, err := prw.parser.parseRequest(req)
+	if err != nil {
+		prw.settings.Logger.Warn("Error decoding remote write request",
+			zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer prw.parser.returnRequest(prw2Req) // 确保归还到池
+	/*body, err := io.ReadAll(req.Body)
 	if err != nil {
 		prw.settings.Logger.Warn("Error decoding remote write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -184,9 +194,9 @@ func (prw *prometheusRemoteWriteReceiver) handlePRW(w http.ResponseWriter, req *
 		prw.settings.Logger.Warn("Error decoding remote write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
+	}*/
 
-	m, stats, err := prw.translateV2(req.Context(), &prw2Req)
+	m, stats, err := prw.translateV2(req.Context(), prw2Req)
 	stats.SetHeaders(w)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest) // Following instructions at https://prometheus.io/docs/specs/remote_write_spec_2_0/#invalid-samples
