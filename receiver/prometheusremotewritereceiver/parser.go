@@ -3,67 +3,62 @@ package prometheusremotewritereceiver
 import (
 	"bytes"
 	"io"
-	"net/http"
 	"sync"
 
 	"github.com/gogo/protobuf/proto"
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 )
 
-type pooledParser struct {
-	bufferPool  *sync.Pool
-	requestPool *sync.Pool
-	maxSize     int64
+type prwParser struct {
+	bodyBufferPool     *sync.Pool
+	writeRequestPool   *sync.Pool
+	maxRequestBodySize int64
 }
 
-func newPooledParser(maxSize int64) *pooledParser {
-	return &pooledParser{
-		bufferPool: &sync.Pool{
+func newPrwParser(maxRequestBodySize int64) *prwParser {
+	if maxRequestBodySize <= 0 {
+
+	}
+	return &prwParser{
+		bodyBufferPool: &sync.Pool{
 			New: func() interface{} {
-				// 预分配 1MB buffer
-				return bytes.NewBuffer(make([]byte, 0, 1024*1024))
+				// Pre-allocate 4KiB
+				return bytes.NewBuffer(make([]byte, 0, 4*1024))
 			},
 		},
-		requestPool: &sync.Pool{
+		writeRequestPool: &sync.Pool{
 			New: func() interface{} {
 				return &writev2.Request{}
 			},
 		},
-		maxSize: maxSize,
+		maxRequestBodySize: maxRequestBodySize,
 	}
 }
 
-func (pp *pooledParser) parseRequest(r *http.Request) (*writev2.Request, error) {
-	// 1. 从池中获取 buffer
-	buf := pp.bufferPool.Get().(*bytes.Buffer)
+func (pp *prwParser) Parse(r io.Reader, callback func(tss *writev2.Request) error) error {
+	buf := pp.bodyBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
-	defer pp.bufferPool.Put(buf)
-
-	// 2. 限制读取大小
-	limitedReader := io.LimitReader(r.Body, pp.maxSize)
-
-	// 3. 复用 buffer 读取
+	defer pp.bodyBufferPool.Put(buf)
+	limitedReader := io.LimitReader(r, pp.maxRequestBodySize)
 	if _, err := buf.ReadFrom(limitedReader); err != nil {
-		return nil, err
+		return err
 	}
-
-	// 4. 从池中获取 Request 对象
-	req := pp.requestPool.Get().(*writev2.Request)
-	req.Reset() // 重置状态
-
-	// 5. Unmarshal
+	req := pp.writeRequestPool.Get().(*writev2.Request)
+	req.Reset()
+	defer pp.returnRequest(req)
 	if err := proto.Unmarshal(buf.Bytes(), req); err != nil {
-		pp.requestPool.Put(req) // 出错也要归还
-		return nil, err
+		return err
 	}
-
-	return req, nil
+	if err := callback(req); err != nil {
+		return err
+	}
+	return nil
 }
 
-func (pp *pooledParser) returnRequest(req *writev2.Request) {
+func (pp *prwParser) returnRequest(req *writev2.Request) {
 	// 如果对象太大，不要放回池中
 	if len(req.Timeseries) > 1000 || len(req.Symbols) > 10000 {
 		return
 	}
-	pp.requestPool.Put(req)
+	pp.writeRequestPool.Put(req)
 }

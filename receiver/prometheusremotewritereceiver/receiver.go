@@ -47,7 +47,7 @@ func newRemoteWriteReceiver(settings receiver.Settings, cfg *Config, nextConsume
 			ReadTimeout: 60 * time.Second,
 		},
 		rmCache: cache,
-		parser:  newPooledParser(10 * 1024 * 1024),
+		parser:  newPrwParser(cfg.MaxRequestBodySize),
 	}, nil
 }
 
@@ -62,7 +62,7 @@ type prometheusRemoteWriteReceiver struct {
 	rmCache *lru.Cache[uint64, pmetric.ResourceMetrics]
 	obsrecv *receiverhelper.ObsReport
 
-	parser *pooledParser
+	parser *prwParser
 }
 
 // metricIdentity contains all the components that uniquely identify a metric
@@ -174,47 +174,34 @@ func (prw *prometheusRemoteWriteReceiver) handlePRW(w http.ResponseWriter, req *
 	// Luckly confighttp's Server has middleware that already decompress the request body for us.
 
 	// 解析请求
-	prw2Req, err := prw.parser.parseRequest(req)
+	err = prw.parser.Parse(req.Body, func(r *writev2.Request) error {
+		m, stats, err := prw.translateV2(req.Context(), r)
+		stats.SetHeaders(w)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest) // Following instructions at https://prometheus.io/docs/specs/remote_write_spec_2_0/#invalid-samples
+			return err
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+
+		// Return if metric count is 0.
+		if m.MetricCount() == 0 {
+			return nil
+		}
+		obsrecvCtx := prw.obsrecv.StartMetricsOp(req.Context())
+		err = prw.nextConsumer.ConsumeMetrics(req.Context(), m)
+		if err != nil {
+			prw.settings.Logger.Error("Error consuming metrics", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
+		}
+		prw.obsrecv.EndMetricsOp(obsrecvCtx, "prometheusremotewritereceiver", m.ResourceMetrics().Len(), err)
+		return nil
+	})
 	if err != nil {
 		prw.settings.Logger.Warn("Error decoding remote write request",
 			zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	defer prw.parser.returnRequest(prw2Req) // 确保归还到池
-	/*body, err := io.ReadAll(req.Body)
-	if err != nil {
-		prw.settings.Logger.Warn("Error decoding remote write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var prw2Req writev2.Request
-	if err = proto.Unmarshal(body, &prw2Req); err != nil {
-		prw.settings.Logger.Warn("Error decoding remote write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}*/
-
-	m, stats, err := prw.translateV2(req.Context(), prw2Req)
-	stats.SetHeaders(w)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest) // Following instructions at https://prometheus.io/docs/specs/remote_write_spec_2_0/#invalid-samples
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-
-	// Return if metric count is 0.
-	if m.MetricCount() == 0 {
-		return
-	}
-	obsrecvCtx := prw.obsrecv.StartMetricsOp(req.Context())
-	err = prw.nextConsumer.ConsumeMetrics(req.Context(), m)
-	if err != nil {
-		prw.settings.Logger.Error("Error consuming metrics", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
-	}
-	prw.obsrecv.EndMetricsOp(obsrecvCtx, "prometheusremotewritereceiver", m.ResourceMetrics().Len(), err)
 }
 
 // parseProto parses the content-type header and returns the version of the remote-write protocol.
