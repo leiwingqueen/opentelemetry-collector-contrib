@@ -3,15 +3,18 @@
 package prometheusremotewritereceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusremotewritereceiver"
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/gogo/protobuf/proto"
 	lru "github.com/hashicorp/golang-lru/v2"
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
 	"github.com/prometheus/common/model"
@@ -47,7 +50,12 @@ func newRemoteWriteReceiver(settings receiver.Settings, cfg *Config, nextConsume
 			ReadTimeout: 60 * time.Second,
 		},
 		rmCache: cache,
-		parser:  newPrwParser(cfg.MaxRequestBodySize),
+		bodyBufferPool: &sync.Pool{
+			New: func() interface{} {
+				// Pre-allocate 4KiB
+				return bytes.NewBuffer(make([]byte, 0, 4*1024))
+			},
+		},
 	}, nil
 }
 
@@ -62,7 +70,7 @@ type prometheusRemoteWriteReceiver struct {
 	rmCache *lru.Cache[uint64, pmetric.ResourceMetrics]
 	obsrecv *receiverhelper.ObsReport
 
-	parser *prwParser
+	bodyBufferPool *sync.Pool
 }
 
 // metricIdentity contains all the components that uniquely identify a metric
@@ -174,7 +182,7 @@ func (prw *prometheusRemoteWriteReceiver) handlePRW(w http.ResponseWriter, req *
 	// Luckly confighttp's Server has middleware that already decompress the request body for us.
 
 	// 解析请求
-	err = prw.parser.Parse(req.Body, func(r *writev2.Request) error {
+	err = prw.parse(req.Body, func(r *writev2.Request) error {
 		m, stats, err := prw.translateV2(req.Context(), r)
 		stats.SetHeaders(w)
 		if err != nil {
@@ -182,7 +190,7 @@ func (prw *prometheusRemoteWriteReceiver) handlePRW(w http.ResponseWriter, req *
 			return err
 		}
 
-		w.WriteHeader(http.StatusNoContent)
+		// w.WriteHeader(http.StatusNoContent)
 
 		// Return if metric count is 0.
 		if m.MetricCount() == 0 {
@@ -201,6 +209,8 @@ func (prw *prometheusRemoteWriteReceiver) handlePRW(w http.ResponseWriter, req *
 			zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	} else {
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -232,6 +242,29 @@ func (*prometheusRemoteWriteReceiver) parseProto(contentType string) (remoteapi.
 
 	// No "proto=" parameter found, assume v1.
 	return remoteapi.WriteV1MessageType, nil
+}
+
+func (prw *prometheusRemoteWriteReceiver) parse(r io.Reader, callback func(tss *writev2.Request) error) error {
+	logger := prw.settings.Logger
+	buf := prw.bodyBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer prw.bodyBufferPool.Put(buf)
+	maxRequestBodySize := prw.config.MaxRequestBodySize
+	limitedReader := io.LimitReader(r, maxRequestBodySize)
+	if _, err := buf.ReadFrom(limitedReader); err != nil {
+		logger.Error("Error reading remote-write request body", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
+		return err
+	}
+	req := &writev2.Request{}
+	if err := proto.Unmarshal(buf.Bytes(), req); err != nil {
+		logger.Error("Error unmarshalling remote-write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
+		return err
+	}
+	if err := callback(req); err != nil {
+		logger.Error("Error processing remote-write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
+		return err
+	}
+	return nil
 }
 
 // getOrCreateRM returns or creates the ResourceMetrics for a job/instance pair within an HTTP request.
