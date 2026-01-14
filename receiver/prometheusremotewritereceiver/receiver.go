@@ -16,6 +16,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/gogo/protobuf/proto"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusremotewritereceiver/internal/prompb"
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
@@ -62,6 +63,11 @@ func newRemoteWriteReceiver(settings receiver.Settings, cfg *Config, nextConsume
 				return bytes.NewBuffer(make([]byte, 0, 4*1024))
 			},
 		},
+		requestPool: &sync.Pool{
+			New: func() interface{} {
+				return &writev2.Request{}
+			},
+		},
 	}, nil
 }
 
@@ -77,6 +83,7 @@ type prometheusRemoteWriteReceiver struct {
 	obsrecv *receiverhelper.ObsReport
 
 	bodyBufferPool *sync.Pool
+	requestPool    *sync.Pool
 }
 
 // metricIdentity contains all the components that uniquely identify a metric
@@ -187,40 +194,37 @@ func (prw *prometheusRemoteWriteReceiver) handlePRW(w http.ResponseWriter, req *
 	// After parsing the content-type header, the next step would be to handle content-encoding.
 	// Luckly confighttp's Server has middleware that already decompress the request body for us.
 
-	prw2Req, err := prw.parse(req.Body)
-	if err != nil {
-		prw.settings.Logger.Warn("Error decoding remote write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+	err = prw.parse(req.Body, func(prw2Req *prompb.WriteV2Request) error {
+		m, stats, err := prw.translateV2(req.Context(), prw2Req)
+		stats.SetHeaders(w)
+		if err != nil {
+			return err
+		}
 
-	m, stats, err := prw.translateV2(req.Context(), prw2Req)
-	stats.SetHeaders(w)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest) // Following instructions at https://prometheus.io/docs/specs/remote_write_spec_2_0/#invalid-samples
-		return
-	}
+		// Return early if metric count is 0.
+		if m.MetricCount() == 0 {
+			return nil
+		}
 
-	// Return early if metric count is 0.
-	if m.MetricCount() == 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	obsrecvCtx := prw.obsrecv.StartMetricsOp(req.Context())
-	err = prw.nextConsumer.ConsumeMetrics(req.Context(), m)
-	prw.obsrecv.EndMetricsOp(obsrecvCtx, "prometheusremotewritereceiver", m.ResourceMetrics().Len(), err)
+		obsrecvCtx := prw.obsrecv.StartMetricsOp(req.Context())
+		err = prw.nextConsumer.ConsumeMetrics(req.Context(), m)
+		prw.obsrecv.EndMetricsOp(obsrecvCtx, "prometheusremotewritereceiver", m.ResourceMetrics().Len(), err)
+		if err != nil {
+			prw.settings.Logger.Error("Error consuming metrics", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
+			return err
+		}
+		return nil
+	})
 	if err != nil {
-		prw.settings.Logger.Error("Error consuming metrics", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
 		if consumererror.IsPermanent(err) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		return
+	} else {
+		w.WriteHeader(http.StatusNoContent)
 	}
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // parseProto parses the content-type header and returns the version of the remote-write protocol.
@@ -254,7 +258,7 @@ func (*prometheusRemoteWriteReceiver) parseProto(contentType string) (remoteapi.
 }
 
 // parse reads and unmarshals the remote-write request body into a writev2.Request.
-func (prw *prometheusRemoteWriteReceiver) parse(r io.Reader) (*writev2.Request, error) {
+func (prw *prometheusRemoteWriteReceiver) parse(r io.Reader, callback func(req *prompb.WriteV2Request) error) error {
 	logger := prw.settings.Logger
 	buf := prw.bodyBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -263,14 +267,20 @@ func (prw *prometheusRemoteWriteReceiver) parse(r io.Reader) (*writev2.Request, 
 	limitedReader := io.LimitReader(r, maxRequestBodySize)
 	if _, err := buf.ReadFrom(limitedReader); err != nil {
 		logger.Error("Error reading remote-write request body", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
-		return nil, err
+		return err
 	}
-	req := &writev2.Request{}
-	if err := proto.Unmarshal(buf.Bytes(), req); err != nil {
+	wru := prompb.GetWriteV2Unmarshaler()
+	defer prompb.PutWriteV2Unmarshaler(wru)
+	req, err := wru.UnmarshalProtobuf(buf.Bytes())
+	if err != nil {
 		logger.Error("Error unmarshalling remote-write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
-		return nil, err
+		return err
 	}
-	return req, nil
+	if err := callback(req); err != nil {
+		logger.Error("Error processing remote-write request", zapcore.Field{Key: "error", Type: zapcore.ErrorType, Interface: err})
+		return err
+	}
+	return nil
 }
 
 // getOrCreateRM returns or creates the ResourceMetrics for a job/instance pair within an HTTP request.
@@ -312,7 +322,7 @@ func (prw *prometheusRemoteWriteReceiver) getOrCreateRM(ls labels.Labels, otelMe
 
 // translateV2 translates a v2 remote-write request into OTLP metrics.
 // translate is not feature complete.
-func (prw *prometheusRemoteWriteReceiver) translateV2(_ context.Context, req *writev2.Request) (pmetric.Metrics, promremote.WriteResponseStats, error) {
+func (prw *prometheusRemoteWriteReceiver) translateV2(_ context.Context, req *prompb.WriteV2Request) (pmetric.Metrics, promremote.WriteResponseStats, error) {
 	var (
 		badRequestErrors error
 		// otelMetrics represents the final metrics, after all the processing, that will be returned by the receiver.
@@ -382,8 +392,8 @@ func (prw *prometheusRemoteWriteReceiver) translateV2(_ context.Context, req *wr
 		description := req.Symbols[ts.Metadata.HelpRef]
 
 		// Handle histograms separately due to their complex mixed-schema processing
-		if ts.Metadata.Type == writev2.Metadata_METRIC_TYPE_HISTOGRAM ||
-			ts.Metadata.Type == writev2.Metadata_METRIC_TYPE_UNSPECIFIED && len(ts.Histograms) > 0 {
+		if ts.Metadata.Type == uint32(writev2.Metadata_METRIC_TYPE_HISTOGRAM) ||
+			ts.Metadata.Type == uint32(writev2.Metadata_METRIC_TYPE_UNSPECIFIED) && len(ts.Histograms) > 0 {
 			prw.processHistogramTimeSeries(otelMetrics, ls, ts, scopeName, scopeVersion, metricName, unit, description, metricCache, &stats, modifiedResourceMetric)
 			continue
 		}
