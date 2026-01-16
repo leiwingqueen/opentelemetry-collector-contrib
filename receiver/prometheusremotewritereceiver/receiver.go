@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/cespare/xxhash/v2"
-	"github.com/gogo/protobuf/proto"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusremotewritereceiver/internal/prompb"
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
@@ -482,8 +481,8 @@ func (prw *prometheusRemoteWriteReceiver) translateV2(_ context.Context, req *pr
 func (prw *prometheusRemoteWriteReceiver) processHistogramTimeSeries(
 	otelMetrics pmetric.Metrics,
 	ls labels.Labels,
-	scopeName, scopeVersion, metricName, unit, description string,
 	ts *prompb.WriteV2TimeSeries,
+	scopeName, scopeVersion, metricName, unit, description string,
 	metricCache map[uint64]pmetric.Metric,
 	stats *promremote.WriteResponseStats,
 	modifiedRM map[uint64]pmetric.ResourceMetrics,
@@ -736,7 +735,7 @@ func hasNegativeCounts(histogram *prompb.WriteV2Histogram) bool {
 
 // convertDeltaBuckets converts Prometheus native histogram spans and deltas to OpenTelemetry bucket counts
 // For integer buckets, the values are deltas between the buckets. i.e a bucket list of 1,2,-2 would correspond to a bucket count of 1,3,1
-func convertDeltaBuckets(spans []writev2.BucketSpan, deltas []int64, buckets pcommon.UInt64Slice) {
+func convertDeltaBuckets(spans []prompb.BucketSpan, deltas []int64, buckets pcommon.UInt64Slice) {
 	// The total capacity is the sum of the deltas and the offsets of the spans.
 	totalCapacity := len(deltas)
 	for _, span := range spans {
@@ -762,7 +761,7 @@ func convertDeltaBuckets(spans []writev2.BucketSpan, deltas []int64, buckets pco
 
 // convertAbsoluteBuckets converts Prometheus native histogram spans and absolute counts to OpenTelemetry bucket counts
 // For float buckets, the values are absolute counts, and must be 0 or positive.
-func convertAbsoluteBuckets(spans []writev2.BucketSpan, counts []float64, buckets pcommon.UInt64Slice) {
+func convertAbsoluteBuckets(spans []prompb.BucketSpan, counts []float64, buckets pcommon.UInt64Slice) {
 	// The total capacity is the sum of the counts and the offsets of the spans.
 	totalCapacity := len(counts)
 	for _, span := range spans {
@@ -840,7 +839,7 @@ func (*prometheusRemoteWriteReceiver) addNHCBDatapoint(datapoints pmetric.Histog
 }
 
 // convertNHCBBuckets converts NHCB bucket data to OpenTelemetry bucket counts
-func convertNHCBBuckets(histogram *writev2.Histogram) []uint64 {
+func convertNHCBBuckets(histogram *prompb.WriteV2Histogram) []uint64 {
 	// For NHCB, we need numExplicitBounds + 1 buckets (including the final +inf bucket)
 	bucketCounts := make([]uint64, len(histogram.CustomValues)+1)
 
@@ -891,12 +890,13 @@ func convertNHCBBuckets(histogram *writev2.Histogram) []uint64 {
 }
 
 // setCountAndSum sets count and sum for histogram datapoints (common interface)
+// Define an interface covering both Histogram and ExponentialHistogram datapoints which provide SetSum and SetCount.
 type countSumSetter interface {
 	SetSum(float64)
 	SetCount(uint64)
 }
 
-func setCountAndSum(histogram *writev2.Histogram, dp countSumSetter) {
+func setCountAndSum(histogram *prompb.WriteV2Histogram, dp countSumSetter) {
 	dp.SetSum(histogram.Sum)
 
 	if histogram.IsFloatHistogram() {

@@ -645,6 +645,36 @@ func clearSlice[T any](s []T) {
 	}
 }
 
+// ---- Helper accessors for WriteV2Histogram -----
+// The generated internal representation stores integer and float counts separately.
+// These accessor methods provide a compatible API similar to the upstream writev2.Histogram
+// so the receiver code can work with the internal type without changes.
+
+// IsFloatHistogram reports whether the histogram uses float64 counts.
+func (h *WriteV2Histogram) IsFloatHistogram() bool {
+	return h.HasCountFloat
+}
+
+// GetZeroCountFloat returns the zero bucket count for float histograms.
+func (h *WriteV2Histogram) GetZeroCountFloat() float64 {
+	return h.ZeroCountFloat
+}
+
+// GetZeroCountInt returns the zero bucket count for integer histograms.
+func (h *WriteV2Histogram) GetZeroCountInt() uint64 {
+	return h.ZeroCountInt
+}
+
+// GetCountFloat returns the overall count for float histograms.
+func (h *WriteV2Histogram) GetCountFloat() float64 {
+	return h.CountFloat
+}
+
+// GetCountInt returns the overall count for integer histograms.
+func (h *WriteV2Histogram) GetCountInt() uint64 {
+	return h.CountInt
+}
+
 // desymbolizeLabels decodes label references into model labels, with given symbols table.
 func desymbolizeLabels(b *labels.ScratchBuilder, labelRefs []uint32, symbols []string) (labels.Labels, error) {
 	b.Reset()
