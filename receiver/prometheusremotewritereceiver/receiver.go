@@ -392,8 +392,8 @@ func (prw *prometheusRemoteWriteReceiver) translateV2(_ context.Context, req *pr
 		description := req.Symbols[ts.Metadata.HelpRef]
 
 		// Handle histograms separately due to their complex mixed-schema processing
-		if ts.Metadata.Type == uint32(writev2.Metadata_METRIC_TYPE_HISTOGRAM) ||
-			ts.Metadata.Type == uint32(writev2.Metadata_METRIC_TYPE_UNSPECIFIED) && len(ts.Histograms) > 0 {
+		if ts.Metadata.Type == writev2.Metadata_METRIC_TYPE_HISTOGRAM ||
+			ts.Metadata.Type == writev2.Metadata_METRIC_TYPE_UNSPECIFIED && len(ts.Histograms) > 0 {
 			prw.processHistogramTimeSeries(otelMetrics, ls, ts, scopeName, scopeVersion, metricName, unit, description, metricCache, &stats, modifiedResourceMetric)
 			continue
 		}
@@ -482,8 +482,8 @@ func (prw *prometheusRemoteWriteReceiver) translateV2(_ context.Context, req *pr
 func (prw *prometheusRemoteWriteReceiver) processHistogramTimeSeries(
 	otelMetrics pmetric.Metrics,
 	ls labels.Labels,
-	ts *writev2.TimeSeries,
 	scopeName, scopeVersion, metricName, unit, description string,
+	ts *prompb.WriteV2TimeSeries,
 	metricCache map[uint64]pmetric.Metric,
 	stats *promremote.WriteResponseStats,
 	modifiedRM map[uint64]pmetric.ResourceMetrics,
@@ -618,7 +618,7 @@ func parseJobAndInstance(dest pcommon.Map, job, instance string) {
 }
 
 // addNumberDatapoints adds the labels to the datapoints attributes.
-func addNumberDatapoints(datapoints pmetric.NumberDataPointSlice, ls labels.Labels, ts *writev2.TimeSeries, stats *promremote.WriteResponseStats) {
+func addNumberDatapoints(datapoints pmetric.NumberDataPointSlice, ls labels.Labels, ts *prompb.WriteV2TimeSeries, stats *promremote.WriteResponseStats) {
 	// Add samples from the timeseries
 	attrs := extractAttributes(ls)
 	for i := range ts.Samples {
@@ -635,7 +635,7 @@ func addNumberDatapoints(datapoints pmetric.NumberDataPointSlice, ls labels.Labe
 	stats.Samples += len(ts.Samples)
 }
 
-func (prw *prometheusRemoteWriteReceiver) addExponentialHistogramDatapoint(datapoints pmetric.ExponentialHistogramDataPointSlice, histogram *writev2.Histogram, attrs pcommon.Map, ls labels.Labels, stats *promremote.WriteResponseStats) {
+func (prw *prometheusRemoteWriteReceiver) addExponentialHistogramDatapoint(datapoints pmetric.ExponentialHistogramDataPointSlice, histogram *prompb.WriteV2Histogram, attrs pcommon.Map, ls labels.Labels, stats *promremote.WriteResponseStats) {
 	// Drop Native Histogram with negative counts
 	if hasNegativeCounts(histogram) {
 		prw.settings.Logger.Info("Dropping Native Histogram series with negative counts",
@@ -687,7 +687,7 @@ func (prw *prometheusRemoteWriteReceiver) addExponentialHistogramDatapoint(datap
 }
 
 // hasNegativeCounts checks if a histogram has any negative counts
-func hasNegativeCounts(histogram *writev2.Histogram) bool {
+func hasNegativeCounts(histogram *prompb.WriteV2Histogram) bool {
 	if histogram.IsFloatHistogram() {
 		// Check overall count
 		if histogram.GetCountFloat() < 0 {
@@ -816,7 +816,7 @@ func (prw *prometheusRemoteWriteReceiver) extractScopeInfo(ls labels.Labels) (st
 }
 
 // addNHCBDatapoint converts a single Native Histogram Custom Buckets (NHCB) to OpenTelemetry histogram datapoints
-func (*prometheusRemoteWriteReceiver) addNHCBDatapoint(datapoints pmetric.HistogramDataPointSlice, histogram *writev2.Histogram, attrs pcommon.Map, stats *promremote.WriteResponseStats) {
+func (*prometheusRemoteWriteReceiver) addNHCBDatapoint(datapoints pmetric.HistogramDataPointSlice, histogram *prompb.WriteV2Histogram, attrs pcommon.Map, stats *promremote.WriteResponseStats) {
 	if len(histogram.CustomValues) == 0 {
 		return
 	}
