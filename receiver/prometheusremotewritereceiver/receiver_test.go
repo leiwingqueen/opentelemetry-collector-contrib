@@ -265,7 +265,8 @@ func TestHandlePRWContentTypeNegotiation(t *testing.T) {
 			err := pBuf.Marshal(&body)
 			assert.NoError(t, err)
 
-			compressedBody := snappy.Encode(nil, pBuf.Bytes())
+			var compressedBody []byte
+			snappy.Encode(compressedBody, pBuf.Bytes())
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/write", bytes.NewBuffer(compressedBody))
 
@@ -1149,24 +1150,15 @@ func TestTranslateV2(t *testing.T) {
 				},
 				Timeseries: []writev2.TimeSeries{
 					{
-						Metadata: writev2.Metadata{Type: writev2.Metadata_METRIC_TYPE_HISTOGRAM},
-						Histograms: []writev2.Histogram{
+						Metadata: writev2.Metadata{
+							Type: writev2.Metadata_METRIC_TYPE_HISTOGRAM,
+						},
+						// Classic histograms populate samples instead of histograms. Those should be dropped.
+						Histograms: []writev2.Histogram{},
+						Samples: []writev2.Sample{
 							{
-								Count: &writev2.Histogram_CountInt{
-									CountInt: 20,
-								},
-								Sum:            30,
-								Timestamp:      1,
-								StartTimestamp: 1,
-								ZeroThreshold:  1,
-								ZeroCount: &writev2.Histogram_ZeroCountInt{
-									ZeroCountInt: 2,
-								},
-								Schema:         -4,
-								PositiveSpans:  []writev2.BucketSpan{{Offset: 1, Length: 2}, {Offset: 3, Length: 1}},
-								NegativeSpans:  []writev2.BucketSpan{{Offset: 0, Length: 1}, {Offset: 2, Length: 1}},
-								PositiveDeltas: []int64{100, 244, 221},
-								NegativeDeltas: []int64{1, 2},
+								Value:     1,
+								Timestamp: 1,
 							},
 						},
 						LabelsRefs: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},

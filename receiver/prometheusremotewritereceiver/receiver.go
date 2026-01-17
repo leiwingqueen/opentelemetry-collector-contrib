@@ -62,11 +62,6 @@ func newRemoteWriteReceiver(settings receiver.Settings, cfg *Config, nextConsume
 				return bytes.NewBuffer(make([]byte, 0, 4*1024))
 			},
 		},
-		requestPool: &sync.Pool{
-			New: func() interface{} {
-				return &writev2.Request{}
-			},
-		},
 	}, nil
 }
 
@@ -82,7 +77,6 @@ type prometheusRemoteWriteReceiver struct {
 	obsrecv *receiverhelper.ObsReport
 
 	bodyBufferPool *sync.Pool
-	requestPool    *sync.Pool
 }
 
 // metricIdentity contains all the components that uniquely identify a metric
