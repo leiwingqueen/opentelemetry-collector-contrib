@@ -219,7 +219,7 @@ func unmarshalWriteV2TimeSeries(src []byte, tsPool []WriteV2TimeSeries, samplesP
 		switch fc.FieldNum {
 		case 1: // labels_refs packed uint32
 			// read packed varints
-			vals, ok := fc.UnpackFixed32s(make([]uint32, 16))
+			vals, ok := fc.UnpackUint32s(out.LabelsRefs[:0])
 			if !ok {
 				// if not packed, try single value
 				v, ok2 := fc.Uint32()

@@ -1018,6 +1018,12 @@ func TestTranslateV2(t *testing.T) {
 
 				return metrics
 			}(),
+			expectedStats: remote.WriteResponseStats{
+				Confirmed:  true,
+				Samples:    0,
+				Histograms: 1,
+				Exemplars:  0,
+			},
 		},
 		{
 			name: "exponential histogram - float with negative counts",
